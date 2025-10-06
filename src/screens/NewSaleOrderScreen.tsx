@@ -93,6 +93,15 @@ const chipTextStyle = (t: string, base = 13) => ({
       ? base - 1
       : base,
 });
+
+const makeEmptyLine = (): Line => ({
+  id: uid(),
+  cf_item_name: '',
+  cf_size_1: '',
+  cf_packing: '',
+  qty: '',
+  rate: '',
+});
 function sanitizeItemId(raw: any): string {
   if (raw == null) return '';
   const s = String(raw).trim();
@@ -216,7 +225,7 @@ const DevTerminal: React.FC<{
         }}
       >
         <Text style={{ color: '#93c5fd', fontWeight: '600' }}>
-          {open ? '▼' : '►'} Debug console — {logs.length}{' '}
+          {open ? 'v' : '>'} Debug console - {logs.length}{' '}
           {logs.length === 1 ? 'line' : 'lines'}
         </Text>
         <View style={{ flexDirection: 'row', gap: 14 }}>
@@ -236,7 +245,7 @@ const DevTerminal: React.FC<{
               selectable
               style={{ color: '#e5e7eb', fontFamily: mono, fontSize: 12, lineHeight: 18 }}
             >
-              {toLines() || '— no logs yet —'}
+              {toLines() || '- no logs yet -'}
             </Text>
           </ScrollView>
         </View>
@@ -281,17 +290,9 @@ export default function NewSaleOrderScreen({ navigation }: any) {
   const [haste, setHaste] = useState<string>('');
 
   // Lines
-  const [lines, setLines] = useState<Line[]>(() =>
-    Array.from({ length: 3 }).map(() => ({
-      id: uid(),
-      cf_item_name: '',
-      cf_size_1: '',
-      cf_packing: '',
-      qty: '',
-      rate: '',
-    }))
-  );
+  const [lines, setLines] = useState<Line[]>(() => [makeEmptyLine()]);
   const [pickerOpenFor, setPickerOpenFor] = useState<string | null>(null);
+  const [itemQuery, setItemQuery] = useState('');
 
   // Debug & terminal
   const [debugOpen, setDebugOpen] = useState<boolean>(false);
@@ -360,7 +361,7 @@ export default function NewSaleOrderScreen({ navigation }: any) {
   }, []);
 
   /** Price basis is derived (no UI):
-   *    - if customer.cf_price_list === 'Nett' → Nett
+   *    - if customer.cf_price_list === 'Nett' -> Nett
    *    - otherwise Ex-mill
    */
   const effectiveBasis: 'Exmill' | 'Nett' =
@@ -383,7 +384,21 @@ export default function NewSaleOrderScreen({ navigation }: any) {
     return m;
   }, [rows]);
 
-  const itemOptions = () => Object.keys(byItem).sort((a, b) => a.localeCompare(b));
+  const itemOptions = useMemo(() => Object.keys(byItem).sort((a, b) => a.localeCompare(b)), [byItem]);
+
+  const filteredItemOptions = useMemo(() => {
+    const q = itemQuery.trim().toLowerCase();
+    if (!q) return itemOptions;
+    return itemOptions.filter((opt) => opt.toLowerCase().includes(q));
+  }, [itemOptions, itemQuery]);
+
+  useEffect(() => {
+    if (!pickerOpenFor) setItemQuery('');
+  }, [pickerOpenFor]);
+
+  const ensureTrailingBlank = (list: Line[]): Line[] =>
+    list.some((li) => (li.cf_item_name || '').trim() === '') ? list : list.concat(makeEmptyLine());
+
   const variantsFor = (item: string): NormalizedRow[] =>
     !item ? [] : (byItem[item] ?? []).slice();
 
@@ -394,11 +409,11 @@ export default function NewSaleOrderScreen({ navigation }: any) {
     effectiveBasis === 'Exmill' ? r?.exmill_rate ?? undefined : r?.nett_rate ?? undefined;
 
   const selectItemForLine = (id: string, item: string) => {
-    setLines((prev) =>
-      prev.map((li) => {
+    setLines((prev) => {
+      const updated = prev.map((li) => {
         if (li.id !== id) return li;
         const v = variantsFor(item)[0] ?? null;
-
+        const basisRate = rateFrom(v);
         return {
           ...li,
           cf_item_name: item,
@@ -410,27 +425,32 @@ export default function NewSaleOrderScreen({ navigation }: any) {
               : '',
           // Manual override is always allowed: we just prefill from basis.
           rate:
-            rateFrom(v) != null && Number.isFinite(rateFrom(v)!)
-              ? String(rateFrom(v))
+            basisRate != null && Number.isFinite(basisRate)
+              ? String(basisRate)
               : '',
         };
-      })
-    );
+      });
+      return ensureTrailingBlank(updated);
+    });
+    setPickerOpenFor(null);
+  };
+
+  const cloneLine = (id: string) => {
+    setLines((prev) => {
+      const idx = prev.findIndex((li) => li.id === id);
+      if (idx === -1) return prev;
+      const copy: Line = { ...prev[idx], id: uid() };
+      const next = [
+        ...prev.slice(0, idx + 1),
+        copy,
+        ...prev.slice(idx + 1),
+      ];
+      return ensureTrailingBlank(next);
+    });
   };
 
   const push3Rows = () =>
-    setLines((prev) =>
-      prev.concat(
-        Array.from({ length: 3 }).map(() => ({
-          id: uid(),
-          cf_item_name: '',
-          cf_size_1: '',
-          cf_packing: '',
-          qty: '',
-          rate: '',
-        }))
-      )
-    );
+    setLines((prev) => prev.concat(Array.from({ length: 3 }, () => makeEmptyLine())));
 
   const computed = useMemo(() => {
     let subtotal = 0;
@@ -597,16 +617,7 @@ export default function NewSaleOrderScreen({ navigation }: any) {
 
       setError(null);
       // Reset form
-      setLines(
-        Array.from({ length: 3 }).map(() => ({
-          id: uid(),
-          cf_item_name: '',
-          cf_size_1: '',
-          cf_packing: '',
-          qty: '',
-          rate: '',
-        }))
-      );
+      setLines([makeEmptyLine()]);
       setHaste('');
       log('INFO', 'createSO', 'success', {
         salesorder_id,
@@ -627,25 +638,53 @@ export default function NewSaleOrderScreen({ navigation }: any) {
     <>
       {/* Item picker */}
       <Portal>
-        <Dialog visible={!!pickerOpenFor} onDismiss={() => setPickerOpenFor(null)}>
+        <Dialog
+          visible={!!pickerOpenFor}
+          onDismiss={() => {
+            setPickerOpenFor(null);
+            setItemQuery('');
+          }}
+        >
           <Dialog.Title>Select item</Dialog.Title>
           <Dialog.Content>
+            <TextInput
+              mode="outlined"
+              dense
+              label="Search items"
+              value={itemQuery}
+              onChangeText={setItemQuery}
+              autoCapitalize="none"
+              autoCorrect={false}
+              style={{ marginBottom: 8 }}
+            />
             <ScrollView style={{ maxHeight: 360 }}>
-              {itemOptions().map((opt) => (
-                <Button
-                  key={opt}
-                  compact
-                  onPress={() => {
-                    if (pickerOpenFor) selectItemForLine(pickerOpenFor, opt);
-                  }}
-                >
-                  {opt}
-                </Button>
-              ))}
+              {filteredItemOptions.length ? (
+                filteredItemOptions.map((opt) => (
+                  <Button
+                    key={opt}
+                    compact
+                    onPress={() => {
+                      if (pickerOpenFor) selectItemForLine(pickerOpenFor, opt);
+                    }}
+                    style={{ marginBottom: 6 }}
+                  >
+                    {opt}
+                  </Button>
+                ))
+              ) : (
+                <Text style={{ opacity: 0.6 }}>No matches</Text>
+              )}
             </ScrollView>
           </Dialog.Content>
           <Dialog.Actions>
-            <Button onPress={() => setPickerOpenFor(null)}>Close</Button>
+            <Button
+              onPress={() => {
+                setPickerOpenFor(null);
+                setItemQuery('');
+              }}
+            >
+              Close
+            </Button>
           </Dialog.Actions>
         </Dialog>
       </Portal>
@@ -719,12 +758,12 @@ export default function NewSaleOrderScreen({ navigation }: any) {
             <TextInput
               mode="outlined"
               dense
-              label="Haste (cf_haste) — optional"
+              label="Haste (cf_haste) - optional"
               value={haste}
               onChangeText={setHaste}
             />
 
-            {/* Price basis row removed — rates auto from customer's cf_price_list; blank ⇒ Ex-mill */}
+            {/* Price basis row removed - rates auto from customer's cf_price_list; blank => Ex-mill */}
           </Card.Content>
         </Card>
 
@@ -769,7 +808,7 @@ export default function NewSaleOrderScreen({ navigation }: any) {
                   <View key={li.id} style={[styles.row, { alignItems: 'center' }]}>
                     <View style={{ width: styles.itemArea.flexBasis }}>
                       {hasItem ? (
-                        <View style={styles.tinyRow}>
+                        <View style={[styles.tinyRow, { gap: 4 }]}>
                           <Chip
                             compact
                             style={styles.chip}
@@ -778,6 +817,7 @@ export default function NewSaleOrderScreen({ navigation }: any) {
                             {li.cf_item_name}
                           </Chip>
                           <IconButton icon="pencil" size={18} onPress={() => setPickerOpenFor(li.id)} />
+                          <IconButton icon="content-copy" size={18} onPress={() => cloneLine(li.id)} />
                         </View>
                       ) : (
                         <Button
@@ -797,7 +837,7 @@ export default function NewSaleOrderScreen({ navigation }: any) {
                         style={styles.chip}
                         textStyle={chipTextStyle(li.cf_size_1)}
                       >
-                        {li.cf_size_1 || '—'}
+                        {li.cf_size_1 || '-'}
                       </Chip>
                     </View>
 
@@ -807,7 +847,7 @@ export default function NewSaleOrderScreen({ navigation }: any) {
                         style={styles.chip}
                         textStyle={chipTextStyle(li.cf_packing)}
                       >
-                        {li.cf_packing || '—'}
+                        {li.cf_packing || '-'}
                       </Chip>
                     </View>
 
@@ -839,7 +879,7 @@ export default function NewSaleOrderScreen({ navigation }: any) {
                   <View style={[styles.row, { alignItems: 'center' }]}>
                     <View style={styles.itemFull}>
                       {hasItem ? (
-                        <View style={styles.tinyRow}>
+                        <View style={[styles.tinyRow, { gap: 4 }]}>
                           <Chip
                             compact
                             style={styles.chip}
@@ -848,6 +888,7 @@ export default function NewSaleOrderScreen({ navigation }: any) {
                             {li.cf_item_name}
                           </Chip>
                           <IconButton icon="pencil" size={18} onPress={() => setPickerOpenFor(li.id)} />
+                          <IconButton icon="content-copy" size={18} onPress={() => cloneLine(li.id)} />
                         </View>
                       ) : (
                         <Button
@@ -869,7 +910,7 @@ export default function NewSaleOrderScreen({ navigation }: any) {
                         style={styles.chip}
                         textStyle={chipTextStyle(li.cf_size_1)}
                       >
-                        {li.cf_size_1 || '—'}
+                        {li.cf_size_1 || '-'}
                       </Chip>
                     </View>
                     <View style={{ flex: 1 }}>
@@ -878,7 +919,7 @@ export default function NewSaleOrderScreen({ navigation }: any) {
                         style={styles.chip}
                         textStyle={chipTextStyle(li.cf_packing)}
                       >
-                        {li.cf_packing || '—'}
+                        {li.cf_packing || '-'}
                       </Chip>
                     </View>
                     <TextInput
@@ -908,9 +949,9 @@ export default function NewSaleOrderScreen({ navigation }: any) {
 
         <Card>
           <Card.Content>
-            <Text>Subtotal: ₹ {computed.subtotal.toFixed(2)}</Text>
-            <Text>Tax (5%): ₹ {computed.tax.toFixed(2)}</Text>
-            <Text variant="titleMedium">Total: ₹ {computed.total.toFixed(2)}</Text>
+            <Text>Subtotal: Rs {computed.subtotal.toFixed(2)}</Text>
+            <Text>Tax (5%): Rs {computed.tax.toFixed(2)}</Text>
+            <Text variant="titleMedium">Total: Rs {computed.total.toFixed(2)}</Text>
             <View style={{ height: 8 }} />
             <Button
               mode="contained"
@@ -959,13 +1000,13 @@ export default function NewSaleOrderScreen({ navigation }: any) {
                           {i + 1}. {v?.cf_item_name} | {v?.cf_size_1} | {v?.cf_packing}
                         </Text>
                         <Text style={{ opacity: 0.8 }}>
-                          Zoho Item: {v?.zoho_item_name || '—'}
+                          Zoho Item: {v?.zoho_item_name || '-'}
                         </Text>
                         <Text style={{ opacity: 0.8 }}>
-                          Raw Item ID: {String(rawId ?? '—')}
+                          Raw Item ID: {String(rawId ?? '-')}
                         </Text>
                         <Text style={{ opacity: 0.8 }}>
-                          Sanitized ID: {cleaned || '—'} (len {cleaned.length}) {ok ? '✅' : '❌'}
+                          Sanitized ID: {cleaned || '-'} (len {cleaned.length}) {ok ? 'OK' : 'ERR'}
                         </Text>
                         <Text style={{ opacity: 0.8 }}>
                           Qty={d.qtyNum} Rate={d.rateNum}

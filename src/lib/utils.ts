@@ -1,13 +1,11 @@
 // src/lib/utils.ts
-// Use main expo-file-system for paths; use legacy only for deprecated helpers.
-import * as FS from 'expo-file-system';
-import * as FSLegacy from 'expo-file-system/legacy';
+// Use legacy expo-file-system helpers for backwards-compatible paths.
+import * as FS from 'expo-file-system/legacy';
 
 export async function ensureDir(dir: string) {
-  // legacy calls avoid SDK 54 deprecation logs while we keep behavior
-  const info = await FSLegacy.getInfoAsync(dir);
+  const info = await FS.getInfoAsync(dir);
   if (!info.exists) {
-    await FSLegacy.makeDirectoryAsync(dir, { intermediates: true });
+    await FS.makeDirectoryAsync(dir, { intermediates: true });
   }
 }
 

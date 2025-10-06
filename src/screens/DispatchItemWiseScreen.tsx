@@ -8,11 +8,10 @@ import {
 import DateTimePicker from '@react-native-community/datetimepicker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Sharing from 'expo-sharing';
-import * as FS from 'expo-file-system';
-import * as FSLegacy from 'expo-file-system/legacy';
+import * as FS from 'expo-file-system/legacy';
 import { fromByteArray } from 'base64-js';
 
-import { fetchCustomers, fetchDispatchItemWise, type OrgKey } from '../lib/zoho';
+import { ORGS, fetchCustomers, fetchDispatchItemWise, type OrgKey } from '../lib/zoho';
 import { generateDispatchItemWisePdf } from '../lib/pdf';
 import { ensureDir } from '../lib/utils';
 
@@ -23,6 +22,7 @@ const CACHE_KEY = (org: OrgKey) => `customers_${org}_v1`;
 export default function DispatchItemWiseScreen() {
   // --- Firm selection
   const [orgKey, setOrgKey] = useState<OrgKey>('MTM');
+  const [orgModalVisible, setOrgModalVisible] = useState(false);
 
   // --- Customer & dates
   const [selectedCustomer, setSelectedCustomer] = useState<string>('');
@@ -162,17 +162,17 @@ export default function DispatchItemWiseScreen() {
         const dir = base + 'Anvaya/';
         await ensureDir(dir);
         const uri = dir + fileName;
-        await FSLegacy.writeAsStringAsync(uri, base64, { encoding: FSLegacy.EncodingType.Base64 });
+        await FS.writeAsStringAsync(uri, base64, { encoding: FS.EncodingType.Base64 });
         return uri;
       };
 
-      let fileUri = await trySave(FSLegacy.documentDirectory);
-      if (!fileUri) fileUri = await trySave(FSLegacy.cacheDirectory);
+      let fileUri = await trySave(FS.documentDirectory);
+      if (!fileUri) fileUri = await trySave(FS.cacheDirectory);
 
-      if (!fileUri && (FS as any).StorageAccessFramework && Platform.OS === 'android') {
+      if (!fileUri && FS.StorageAccessFramework && Platform.OS === 'android') {
         appendLog('Requesting SAF permission...');
         const perm = await FS.StorageAccessFramework.requestDirectoryPermissionsAsync();
-        if (perm.granted) {
+        if (perm.granted && perm.directoryUri) {
           const created = await FS.StorageAccessFramework.createFileAsync(perm.directoryUri, fileName, 'application/pdf');
           await FS.writeAsStringAsync(created, base64, { encoding: FS.EncodingType.Base64 });
           fileUri = created;
@@ -182,7 +182,7 @@ export default function DispatchItemWiseScreen() {
       if (!fileUri) throw new Error('No writable directory available');
 
       appendLog(`Saved -> ${fileUri}`);
-      setSnack({ visible: true, msg: 'Item-wise Dispatch PDF ready — sharing...' });
+      setSnack({ visible: true, msg: 'Item-wise Dispatch PDF ready - sharing...' });
       await openFile(fileUri);
     } catch (e: any) {
       setSnack({ visible: true, msg: 'Error generating PDF' });
@@ -202,7 +202,7 @@ export default function DispatchItemWiseScreen() {
     <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12 }}>
       <Card style={{ borderRadius: 16, overflow: 'hidden' }}>
         <Card.Title
-          title="🧾 Dispatch Item Wise"
+          title="Dispatch Item Wise"
           subtitle="Select firm, customer, date range and options"
           right={(props) => (
             <IconButton
@@ -216,30 +216,39 @@ export default function DispatchItemWiseScreen() {
         />
         <Divider />
         <Card.Content>
-          {/* Firm selector - styled like Dispatch screen */}
+          {/* Firm selector - match FormScreen styling */}
           <Text style={{ marginTop: 8, marginBottom: 6 }}>Organisation</Text>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-            {(['PM', 'MTM', 'RMD', 'MURLI'] as OrgKey[]).map(k => {
-              const selected = orgKey === k;
-              return (
-                <Chip
-                  key={k}
-                  icon="office-building"
-                  selected={selected}
-                  onPress={() => setOrgKey(k)}
-                  style={{
-                    marginRight: 8,
-                    marginBottom: 8,
-                    // give a subtle filled look when selected (matches Dispatch vibe)
-                    backgroundColor: selected ? 'rgba(99,102,241,0.15)' : undefined,
-                  }}
-                  textStyle={{ fontWeight: selected ? '700' : '500' }}
-                >
-                  {orgLabel(k)}
-                </Chip>
-              );
-            })}
+            <Chip icon="office-building" selected onPress={() => setOrgModalVisible(true)} style={{ alignSelf: 'flex-start' }}>
+              {orgLabel(orgKey)}
+            </Chip>
           </View>
+
+          <Portal>
+            <Modal
+              visible={orgModalVisible}
+              onDismiss={() => setOrgModalVisible(false)}
+              contentContainerStyle={{ backgroundColor: 'white', margin: 16, borderRadius: 12, padding: 12, maxHeight: '70%' }}
+            >
+              <Text variant="titleMedium" style={{ marginBottom: 8 }}>Select Organisation</Text>
+              {ORGS.map((o) => (
+                <Button
+                  key={o.key}
+                  mode={o.key === orgKey ? 'contained' : 'outlined'}
+                  style={{ marginBottom: 8 }}
+                  onPress={() => {
+                    setOrgKey(o.key as OrgKey);
+                    setOrgModalVisible(false);
+                  }}
+                >
+                  {o.name}
+                </Button>
+              ))}
+              <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
+                <Button onPress={() => setOrgModalVisible(false)}>Close</Button>
+              </View>
+            </Modal>
+          </Portal>
 
           {/* Customer picker */}
           <Text style={{ marginTop: 16, marginBottom: 6 }}>Customer</Text>
@@ -331,14 +340,14 @@ export default function DispatchItemWiseScreen() {
             style={{ marginTop: 18, paddingVertical: 6, borderRadius: 10 }}
             disabled={!selectedCustomer || isWorking}
           >
-            📄 Generate Item-wise PDF
+            Generate Item-wise PDF
           </Button>
         </Card.Content>
       </Card>
 
       {/* Activity */}
       <Card style={{ marginTop: 16, borderRadius: 16, marginBottom: 20 }}>
-        <Card.Title title="📡 Activity" subtitle="Live log" right={() => (isWorking ? <ActivityIndicator style={{ marginRight: 16 }} /> : null)} />
+        <Card.Title title="Activity" subtitle="Live log" right={() => (isWorking ? <ActivityIndicator style={{ marginRight: 16 }} /> : null)} />
         <Divider />
         <Card.Content>
           {log.length === 0 ? (

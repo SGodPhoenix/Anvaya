@@ -17,7 +17,7 @@ import {
 import DateTimePicker from '@react-native-community/datetimepicker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Sharing from 'expo-sharing';
-import * as FS from 'expo-file-system';
+import * as FS from 'expo-file-system/legacy';
 
 import { fetchCustomers, fetchInvoicesAndMerge, ORGS, type OrgKey } from '../lib/zoho';
 import { getHistory, pushHistory, type HistoryItem } from '../lib/history';

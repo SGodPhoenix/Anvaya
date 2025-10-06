@@ -37,6 +37,7 @@ const features: Array<{
 
 export default function HomeScreen({ navigation }: Props) {
   const theme = useTheme();
+  const navigateTo = (route: keyof RootStackParamList) => navigation.navigate(route as any);
 
   return (
     <ImageBackground
@@ -83,7 +84,7 @@ export default function HomeScreen({ navigation }: Props) {
               <TouchableRipple
                 key={f.key as string}
                 rippleColor="rgba(0,0,0,0.08)"
-                onPress={() => navigation.navigate(f.key)}
+                onPress={() => navigateTo(f.key)}
                 style={{ marginBottom: 12 }}
               >
                 <Card mode="elevated" style={styles.rowCard}>

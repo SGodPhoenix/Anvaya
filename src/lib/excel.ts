@@ -5,12 +5,14 @@
 import * as FS from 'expo-file-system/legacy';
 import * as Crypto from 'expo-crypto';
 import * as Sharing from 'expo-sharing';
-import XLSXModule from 'xlsx-js-style';
+import * as XLSXRaw from 'xlsx-js-style';
+import type { CellObject, WorkBook, WorkSheet } from 'xlsx-js-style';
 import { ensureDir, uniqueName } from './utils';
 import { fetchOutstandingForOrg, type OutstandingCustomerRow } from './zoho';
 
 // Make xlsx module work whether it exports default or not
-const XLSX: any = (XLSXModule as any)?.default ?? XLSXModule;
+type XLSXType = typeof XLSXRaw;
+const XLSX = ((XLSXRaw as any)?.default ?? XLSXRaw) as XLSXType;
 
 // ---- Types ----
 export type OutstandingRow = OutstandingCustomerRow;       // for outstanding workbook
@@ -28,26 +30,26 @@ const AMOUNT_HEADERS = [
 
 const moneyFmt = '₹#,##,##0.00"/-";[Red]-₹#,##,##0.00"/-";"-"';
 
-function bold(v: XLSX.CellObject) {
+function bold(v: CellObject) {
   (v as any).s = { ...(v as any).s, font: { bold: true } };
   return v;
 }
-function withFill(v: XLSX.CellObject, rgb: string) {
+function withFill(v: CellObject, rgb: string) {
   (v as any).s = { ...(v as any).s, fill: { patternType: 'solid', fgColor: { rgb } } };
   return v;
 }
-function withBorder(v: XLSX.CellObject, style: 'thin'|'medium'|'thick' = 'thin') {
+function withBorder(v: CellObject, style: 'thin'|'medium'|'thick' = 'thin') {
   (v as any).s = { ...(v as any).s, border: {
     top: { style }, bottom: { style }, left: { style }, right: { style }
   }};
   return v;
 }
-function money(v: number): XLSX.CellObject {
-  const c: XLSX.CellObject = { t: 'n', v };
+function money(v: number): CellObject {
+  const c: CellObject = { t: 'n', v };
   (c as any).s = { numFmt: moneyFmt };
   return c;
 }
-function text(v: string): XLSX.CellObject { return { t: 's', v }; }
+function text(v: string): CellObject { return { t: 's', v }; }
 
 function headerRow(cols: string[]) {
   return cols.map(h => withBorder(withFill(bold(text(h)), 'D9E1F2'), 'thick'));
@@ -87,7 +89,7 @@ function sheetFromRows(
   title: string,
   rows: OutstandingRow[],
   mode: 'PM' | 'AGENCY' | 'NONE'
-): XLSX.WorkSheet {
+): WorkSheet {
   const leftCols = mode === 'PM'
     ? ['Division','Customer Name','City']
     : mode === 'AGENCY'
@@ -209,7 +211,7 @@ function sheetFromRows(
   return ws;
 }
 
-async function saveAndShare(workbook: XLSX.WorkBook, filename: string) {
+async function saveAndShare(workbook: WorkBook, filename: string) {
   const wbout = XLSX.write(workbook, { type: 'base64', bookType: 'xlsx' });
   const dir = FS.documentDirectory || FS.cacheDirectory;
   if (!dir) throw new Error('No writable directory available');
@@ -223,7 +225,7 @@ async function saveAndShare(workbook: XLSX.WorkBook, filename: string) {
 
 /** Build the 4-sheet Outstanding workbook (PM/MTM/RMD/Murli) */
 export async function buildAndShareOutstandingWorkbook(log?: (s: string) => void) {
-  const sheets: { name: string; ws: XLSX.WorkSheet }[] = [];
+  const sheets: { name: string; ws: WorkSheet }[] = [];
 
   log?.('PM…');
   const pm = await fetchOutstandingForOrg('PM', log);

@@ -334,9 +334,9 @@ function LineBlock({ line }: { line: SOStatusLine }) {
 
       {line.events.slice(1).map((ev) => (
         <View key={`${ev.invoice_id}-${ev.date}`} style={styles.rowSub}>
-          <Text style={[styles.cell, styles.cellItem]} />
-          <Text style={styles.cell} />
-          <Text style={styles.cell} />
+          <Text style={[styles.cell, styles.cellItem]}>{' '}</Text>
+          <Text style={styles.cell}>{' '}</Text>
+          <Text style={styles.cell}>{' '}</Text>
           <Text style={styles.cell}>{ev.invoice_number}</Text>
           <Text style={styles.cell}>{fmtDate(ev.date)}</Text>
           <Text style={styles.cell}>{ev.lrNo ?? '-'}</Text>

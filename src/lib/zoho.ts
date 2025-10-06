@@ -1,7 +1,6 @@
 // src/lib/zoho.ts
 import Constants from 'expo-constants';
-import * as FS from 'expo-file-system';               // modern FS (for SAF)
-import * as FSLegacy from 'expo-file-system/legacy';  // legacy FS (paths + write)
+import * as FS from 'expo-file-system/legacy';  // expo legacy API keeps document/cache + SAF helpers
 import { fromByteArray } from 'base64-js';
 import { Platform } from 'react-native';
 
@@ -35,7 +34,7 @@ async function getAccessToken(org: OrgKey, log?: (s: string) => void): Promise<s
     grant_type: 'refresh_token',
   });
   const url = `${ACCOUNTS_BASE}/oauth/v2/token?${params.toString()}`;
-  log?.('Auth…');
+  log?.('Auth...');
   const r = await fetch(url, { method: 'POST' });
   if (!r.ok) throw new Error(`Token error ${r.status}`);
   const j = await r.json();
@@ -43,9 +42,14 @@ async function getAccessToken(org: OrgKey, log?: (s: string) => void): Promise<s
 }
 
 function orgId(org: OrgKey): string {
-  const id = cfg(org).ORG;
-  if (!id) throw new Error(`Missing ORG for ${org}`);
-  return id;
+  const viaCfg = cfg(org).ORG;
+  if (viaCfg) return viaCfg;
+
+  const extra = ((Constants as any)?.expoConfig?.extra || (Constants as any)?.manifest?.extra || {}) as Record<string, any>;
+  const envKey = `ZB_${org}_ORG`;
+  const legacy = extra?.[envKey] || (process.env as any)?.[envKey];
+  if (!legacy) throw new Error(`Missing ORG for ${org}`);
+  return String(legacy);
 }
 
 
@@ -82,15 +86,15 @@ async function zFetchJSON(
       const wait = retryAfter > 0
         ? retryAfter * 1000
         : Math.min(10000, 1000 * Math.pow(1.6, attempt + 1)); // backoff curve
-      log?.(`${label} ${status} • retry ${attempt + 1}/${ZB_MAX_RETRIES} in ${wait}ms`);
+      log?.(`${label} ${status} - retry ${attempt + 1}/${ZB_MAX_RETRIES} in ${wait}ms`);
       await sleep(wait);
       continue;
     }
 
     const body = await resp.text();
-    throw new Error(`${label} ${status} • ${body.slice(0, 140)}`);
+    throw new Error(`${label} ${status} - ${body.slice(0, 140)}`);
   }
-  throw new Error(`${label} • too many retries`);
+  throw new Error(`${label} - too many retries`);
 }
 
 
@@ -163,7 +167,7 @@ export async function fetchInvoicesAndMerge(
     if (!r.ok) continue;
     const bytes = new Uint8Array(await r.arrayBuffer());
     pdfBuffers.push(bytes);
-    log?.(`…got #${inv.invoice_number} (${pdfBuffers.length}/${matched.length})`);
+    log?.(`...got #${inv.invoice_number} (${pdfBuffers.length}/${matched.length})`);
   }
   if (pdfBuffers.length === 0) throw new Error('No PDFs retrieved');
 
@@ -174,16 +178,16 @@ export async function fetchInvoicesAndMerge(
   const fileName = `${uniqueName()}_${org}_${safeCustomer}.pdf`;
 
   // 4) Save with legacy paths first (works reliably in Expo Go)
-  const legacyDoc = FSLegacy.documentDirectory;
-  const legacyCache = FSLegacy.cacheDirectory;
-  log?.(`Legacy FS → doc=${legacyDoc ?? 'null'} cache=${legacyCache ?? 'null'}`);
+  const legacyDoc = FS.documentDirectory;
+  const legacyCache = FS.cacheDirectory;
+  log?.(`Legacy FS -> doc=${legacyDoc ?? 'null'} cache=${legacyCache ?? 'null'}`);
 
   const trySave = async (base: string | null | undefined) => {
     if (!base) return null;
     const dir = base + 'Anvaya/';
     await ensureDir(dir);
     const uri = dir + fileName;
-    await FSLegacy.writeAsStringAsync(uri, base64, { encoding: FSLegacy.EncodingType.Base64 });
+    await FS.writeAsStringAsync(uri, base64, { encoding: FS.EncodingType.Base64 });
     return uri;
   };
 
@@ -191,7 +195,7 @@ export async function fetchInvoicesAndMerge(
     let uri = await trySave(legacyDoc);
     if (!uri) uri = await trySave(legacyCache);
     if (uri) {
-      log?.(`Saved → ${uri}`);
+      log?.(`Saved -> ${uri}`);
       return { fileUri: uri, count: pdfBuffers.length, fileName };
     }
   } catch (e: any) {
@@ -199,19 +203,19 @@ export async function fetchInvoicesAndMerge(
     // fall through to SAF
   }
 
-  // 5) Android SAF fallback — user picks a folder
+  // 5) Android SAF fallback - user picks a folder
   if (Platform.OS === 'android' && (FS as any).StorageAccessFramework) {
-    log?.('Requesting SAF folder permission…');
+    log?.('Requesting SAF folder permission...');
     const perm = await FS.StorageAccessFramework.requestDirectoryPermissionsAsync();
     if (perm.granted) {
-      log?.('SAF granted. Creating file…');
+      log?.('SAF granted. Creating file...');
       const uri = await FS.StorageAccessFramework.createFileAsync(
         perm.directoryUri,
         fileName,
         'application/pdf'
       );
       await FS.writeAsStringAsync(uri, base64, { encoding: FS.EncodingType.Base64 });
-      log?.(`Saved (SAF) → ${uri}`);
+      log?.(`Saved (SAF) -> ${uri}`);
       return { fileUri: uri, count: pdfBuffers.length, fileName };
     }
     throw new Error('SAF permission not granted by user');
@@ -249,6 +253,7 @@ export async function fetchDispatchRows(
   lrNo: string;
   lrDate: string;
   transport: string;
+  type: string;
 }>> {
   const { org, customer, from, to } = payload;
   const token = await getAccessToken(org, log);
@@ -274,6 +279,7 @@ export async function fetchDispatchRows(
         lrNo: readCF(inv, 'cf_lr_no') || '',
         lrDate: readCF(inv, 'cf_lr_date') || '',
         transport: readCF(inv, 'cf_transport_name') || '',
+        type: readCF(inv, 'cf_type') || '',
       });
     }
 
@@ -435,7 +441,7 @@ export async function fetchPendingDispatchMTM(
   const headers = { Authorization: `Zoho-oauthtoken ${token}` };
   const { start, end } = last12MonthsRange();
 
-  log?.(`Last 12 months ${start}..${end} — listing Sales Orders…`);
+  log?.(`Last 12 months ${start}..${end} - listing Sales Orders...`);
 
   let page = 1;
   const soIds: string[] = [];
@@ -449,7 +455,7 @@ export async function fetchPendingDispatchMTM(
     page++;
   }
 
-  log?.(`Found ${soIds.length} SOs — expanding lines…`);
+  log?.(`Found ${soIds.length} SOs - expanding lines...`);
 
   const out: PendingRow[] = [];
   for (const sid of soIds) {
@@ -499,25 +505,25 @@ export async function fetchPendingDispatchMTM(
 // === Boutique Images (MTM) ==========================================
 // (Local cache of active MTM item images, with manifest + cleanup)
 function boutiqueBaseDir(): string {
-  const base = FSLegacy.documentDirectory || FSLegacy.cacheDirectory;
+  const base = FS.documentDirectory || FS.cacheDirectory;
   if (!base) throw new Error('No writable directory available');
   return base + 'Anvaya/BoutiqueImages/';
 }
 
-// NOTE: do NOT redefine ensureDir here — we use the one from ./utils
+// NOTE: do NOT redefine ensureDir here - we use the one from ./utils
 
 async function readJSON(uri: string): Promise<any | null> {
   try {
-    const info = await FSLegacy.getInfoAsync(uri);
+    const info = await FS.getInfoAsync(uri);
     if (!info.exists) return null;
-    const txt = await FSLegacy.readAsStringAsync(uri);
+    const txt = await FS.readAsStringAsync(uri);
     return JSON.parse(txt);
   } catch {
     return null;
   }
 }
 async function writeJSON(uri: string, obj: any) {
-  await FSLegacy.writeAsStringAsync(uri, JSON.stringify(obj, null, 2));
+  await FS.writeAsStringAsync(uri, JSON.stringify(obj, null, 2));
 }
 
 type Manifest = {
@@ -551,20 +557,20 @@ async function saveImage(folder: string, filename: string, data: Uint8Array) {
   await ensureDir(dir);
   const uri = dir + filename;
   const b64 = fromByteArray(data);
-  await FSLegacy.writeAsStringAsync(uri, b64, { encoding: FSLegacy.EncodingType.Base64 });
+  await FS.writeAsStringAsync(uri, b64, { encoding: FS.EncodingType.Base64 });
   return uri;
 }
 
 export async function listBoutiqueFolders(): Promise<{ name: string; count: number }[]> {
   const base = boutiqueBaseDir();
   await ensureDir(base);
-  const entries = await FSLegacy.readDirectoryAsync(base);
+  const entries = await FS.readDirectoryAsync(base);
   const out: { name: string; count: number }[] = [];
   for (const name of entries) {
     if (name === '_manifest.json') continue;
-    const info = await FSLegacy.getInfoAsync(base + name);
+    const info = await FS.getInfoAsync(base + name);
     if (!info.exists || !info.isDirectory) continue;
-    const files = await FSLegacy.readDirectoryAsync(base + name + '/');
+    const files = await FS.readDirectoryAsync(base + name + '/');
     out.push({ name, count: files.length });
   }
   out.sort((a, b) => a.name.localeCompare(b.name));
@@ -574,9 +580,9 @@ export async function listBoutiqueFolders(): Promise<{ name: string; count: numb
 export async function listImagesInFolder(prefix: string): Promise<string[]> {
   const base = boutiqueBaseDir();
   const dir = base + prefix + '/';
-  const info = await FSLegacy.getInfoAsync(dir);
+  const info = await FS.getInfoAsync(dir);
   if (!info.exists) return [];
-  const files = await FSLegacy.readDirectoryAsync(dir);
+  const files = await FS.readDirectoryAsync(dir);
   return files.map((f) => dir + f);
 }
 
@@ -593,7 +599,7 @@ export async function syncBoutiqueImagesMTM(log?: (s: string) => void): Promise<
   let totalDownloaded = 0;
 
   while (true) {
-    log?.(`Fetching ACTIVE items page ${page}…`);
+    log?.(`Fetching ACTIVE items page ${page}...`);
     const url = `${BOOKS_BASE}/items?organization_id=${oid}&page=${page}&per_page=200&status=active`;
     const r = await fetch(url, { headers });
     if (!r.ok) throw new Error(`Items ${r.status}`);
@@ -631,10 +637,10 @@ export async function syncBoutiqueImagesMTM(log?: (s: string) => void): Promise<
         let skip = false;
         if (known && known.file_name === filename) {
           try {
-            const info = await FSLegacy.getInfoAsync(uri);
+            const info = await FS.getInfoAsync(uri);
             if (info.exists) {
               skip = true;
-              log?.(`⏭️  Skip unchanged ${itemName} → ${filename}`);
+              log?.(`>>  Skip unchanged ${itemName} -> ${filename}`);
             }
           } catch {}
         }
@@ -647,9 +653,9 @@ export async function syncBoutiqueImagesMTM(log?: (s: string) => void): Promise<
             await saveImage(prefix, filename, bytes);
             mfDocs[docId] = { file_name: filename, size: bytes.byteLength };
             totalDownloaded++;
-            log?.(`✅ Downloaded ${itemName} → ${filename}`);
+            log?.(`OK Downloaded ${itemName} -> ${filename}`);
           } else {
-            log?.(`❌ Failed download ${itemName} → ${filename} (${rf.status})`);
+            log?.(`ERR Failed download ${itemName} -> ${filename} (${rf.status})`);
           }
         }
       }
@@ -667,21 +673,21 @@ export async function syncBoutiqueImagesMTM(log?: (s: string) => void): Promise<
 
   // cleanup
   const base = boutiqueBaseDir();
-  const folders = await FSLegacy.readDirectoryAsync(base);
+  const folders = await FS.readDirectoryAsync(base);
   for (const folder of folders) {
     if (folder === '_manifest.json') continue;
     const dir = base + folder + '/';
-    const info = await FSLegacy.getInfoAsync(dir);
+    const info = await FS.getInfoAsync(dir);
     if (!info.exists || !info.isDirectory) continue;
-    const files = await FSLegacy.readDirectoryAsync(dir);
+    const files = await FS.readDirectoryAsync(dir);
     for (const f of files) {
       const rel = `${folder}/${f}`;
       if (!activeSet.has(rel)) {
         try {
-          await FSLegacy.deleteAsync(dir + f);
-          log?.(`🗑️ Deleted ${rel}`);
+          await FS.deleteAsync(dir + f);
+          log?.(`DELETE Deleted ${rel}`);
         } catch {
-          log?.(`⚠️ Could not delete ${rel}`);
+          log?.(`WARN Could not delete ${rel}`);
         }
       }
     }
@@ -783,43 +789,52 @@ export type OutstandingCustomerRow = {
   '0-15_payments': number;
   '16-90_payments': number;
 };
+export type OutstandingInvoiceRow = {
+  invoiceId: string;
+  invoiceNumber: string;
+  invoiceDate: string;
+  total: number;
+  balance: number;
+  age: number;
+};
+
 
 export async function fetchOutstandingForOrg(
   org: OrgKey,
   log?: (s: string) => void
-): Promise<Record<string, OutstandingCustomerRow>> {
+): Promise<{ summary: Record<string, OutstandingCustomerRow>; invoices: Record<string, OutstandingInvoiceRow[]> }> {
   const token = await getAccessToken(org, log);
   const oid = orgId(org);
   const headers = { Authorization: `Zoho-oauthtoken ${token}` };
 
   // contacts
-  log?.('Contacts…');
+  log?.('Contacts...');
   const contacts: any[] = await paged(`${BOOKS_BASE}/contacts`, headers, { organization_id: oid });
 
   // open invoices
   const openInvoices: any[] = [];
   for (const st of OPEN_STATUSES) {
-    log?.(`Invoices (${st})…`);
+    log?.(`Invoices (${st})...`);
     const part = await paged(`${BOOKS_BASE}/invoices`, headers, { organization_id: oid, status: st });
     openInvoices.push(...part);
   }
 
   // open credit notes
-  log?.('Credit notes (open)…');
+  log?.('Credit notes (open)...');
   const creditnotes: any[] = await paged(`${BOOKS_BASE}/creditnotes`, headers, { organization_id: oid, status: 'open' });
 
   // payments (customerpayments)
-  log?.('Payments…');
+  log?.('Payments...');
   const payments: any[] = await paged(`${BOOKS_BASE}/customerpayments`, headers, { organization_id: oid });
 
   // advances: customeradvancepayments OR retainerinvoices (fallback)
   let advances: any[] = [];
   try {
-    log?.('Advance payments…');
+    log?.('Advance payments...');
     advances = await paged(`${BOOKS_BASE}/customeradvancepayments`, headers, { organization_id: oid });
   } catch {
     try {
-      log?.('Retainer invoices (fallback)…');
+      log?.('Retainer invoices (fallback)...');
       advances = await paged(`${BOOKS_BASE}/retainerinvoices`, headers, { organization_id: oid });
     } catch {
       advances = [];
@@ -853,6 +868,7 @@ export async function fetchOutstandingForOrg(
   }
 
   const rows: Record<string, OutstandingCustomerRow> = {};
+  const invoicesByCustomer: Record<string, OutstandingInvoiceRow[]> = {};
   const groupMode: 'PM' | 'AGENCY' | 'NONE' =
     org === 'PM' ? 'PM' : org === 'MTM' || org === 'RMD' ? 'AGENCY' : 'NONE';
 
@@ -893,13 +909,32 @@ export async function fetchOutstandingForOrg(
 
     // Buckets by invoice BILL DATE
     const buckets = Array(BUCKETS.length).fill(0);
+    const invoiceRows: OutstandingInvoiceRow[] = [];
     for (const inv of invs) {
       const dt = parseISO(inv.date);
-      if (!dt) continue;
-      const bal = safeNum(inv.balance);
-      if (bal <= 0) continue;
-      buckets[bucketIndex(daysBetween(TODAY, dt))] += bal;
+      const totalAmount = safeNum(inv.total || inv.total_amount || inv.amount || 0);
+      const rawBalance = safeNum(
+        inv.balance ?? inv.balance_amount ?? inv.outstanding_balance ?? totalAmount
+      );
+      const age = dt ? Math.max(0, daysBetween(TODAY, dt)) : 0;
+      if (rawBalance > 0 && dt) {
+        buckets[bucketIndex(age)] += rawBalance;
+      } else if (rawBalance > 0) {
+        buckets[bucketIndex(0)] += rawBalance;
+      }
+      invoiceRows.push({
+        invoiceId: String(inv.invoice_id || ''),
+        invoiceNumber: String(inv.invoice_number || inv.invoice_id || ''),
+        invoiceDate: String(inv.date || ''),
+        total: round2(totalAmount),
+        balance: round2(rawBalance),
+        age,
+      });
     }
+    const unpaidInvoices = invoiceRows.filter((row) => row.balance > 0);
+    invoicesByCustomer[custName] = unpaidInvoices.sort((a, b) =>
+      a.invoiceDate.localeCompare(b.invoiceDate)
+    );
 
     const totalOut = buckets.reduce((a, b) => a + b, 0);
     const above180 = round2(buckets[idx_181] + buckets[idx_366] + buckets[idx_730]);
@@ -935,7 +970,7 @@ export async function fetchOutstandingForOrg(
     rows[custName] = row;
   }
 
-  return rows;
+  return { summary: rows, invoices: invoicesByCustomer };
 }
 
 function round2(x: number) {
@@ -1166,7 +1201,10 @@ export async function fetchDispatchItemWise(
 
       for (const li of detail.line_items || []) {
         // Common fields
-        const baseName = li.name || cfLine(li, 'cf_item_name', 'item name', 'item_name') || '';
+        const baseName =
+          cfLine(li, 'cf_item_name', 'item name', 'item_name') ||
+          li.name ||
+          '';
         const qty = Number(li.quantity || 0);
         const rate = Number(li.rate ?? li.item_rate ?? 0);
 
@@ -1306,7 +1344,7 @@ export async function listMTMCustomers(): Promise<{ id: string; name: string }[]
 
 
 // ---------- core builder ----------
-// (Build SO→invoice linkage for MTM within a date range)
+// (Build SO->invoice linkage for MTM within a date range)
 
 export async function fetchSaleOrderStatusMTM(
   params: { from: string; to: string; customerId?: string },
@@ -1447,28 +1485,13 @@ for (const inv of invList) {
 
 
 
-// Helper to read MTM org id from app config / env
-function mtmOrgId(): string {
-  // Adjust the keys if your extra/env names are different
-  return (
-    (Constants.expoConfig?.extra as any)?.ZB_MTM_ORG ||
-    (process.env as any)?.ZB_MTM_ORG ||
-    ''
-  );
-}
-
-
-
-
-
-
 /** List active salespersons (MTM) -> {id, name}[] */
 // (Used by SO Status filter; filters out inactive salespersons)
 
 export async function fetchSalespersonsMTM(): Promise<{ id: string; name: string }[]> {
   const access = await getAccessToken('MTM');                  // <-- use your existing token helper
-  const ORG = mtmOrgId();
-  const url = `${BOOKS_BASE}/settings/salespersons?organization_id=${ORG}&per_page=200`;
+  const ORG = orgId('MTM');
+  const url = `${BOOKS_BASE}/salespersons?organization_id=${ORG}&per_page=200`;
 
   const res = await fetch(url, {
     headers: { Authorization: `Zoho-oauthtoken ${access}` },
@@ -1476,7 +1499,8 @@ export async function fetchSalespersonsMTM(): Promise<{ id: string; name: string
   if (!res.ok) throw new Error(`Salespersons HTTP ${res.status}`);
   const j = await res.json();
 
-  const list = (j.salespersons || [])
+  const raw = Array.isArray(j.salespersons) ? j.salespersons : Array.isArray(j.data) ? j.data : [];
+  const list = raw
     .filter((s: any) => s.is_active !== false)
     .map((s: any) => ({
       id: String(s.salesperson_id),
@@ -1495,7 +1519,7 @@ export async function fetchSalespersonsMTM(): Promise<{ id: string; name: string
 
 export async function downloadSalesOrderPdfMTM(salesorder_id: string): Promise<string> {
   const access = await getAccessToken('MTM');                  // <-- use your existing token helper
-  const ORG = mtmOrgId();
+  const ORG = orgId('MTM');
   const url = `${BOOKS_BASE}/salesorders/${salesorder_id}?organization_id=${ORG}`;
 
   const res = await fetch(url, {
@@ -1512,7 +1536,7 @@ export async function downloadSalesOrderPdfMTM(salesorder_id: string): Promise<s
 
   const file = `${dir}SO_${salesorder_id}.pdf`;
   const b64 = fromByteArray(new Uint8Array(buf));
-  await FSLegacy.writeAsStringAsync(file, b64, { encoding: FSLegacy.EncodingType.Base64 });
+  await FS.writeAsStringAsync(file, b64, { encoding: FS.EncodingType.Base64 });
 
   return file;
 }

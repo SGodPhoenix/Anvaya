@@ -215,11 +215,7 @@ export default function BoutiqueFolderScreen({ route, navigation }: Props) {
                   style={{ width: '100%', aspectRatio: 1, backgroundColor: '#eee' }}
                   resizeMode="cover"
                 />
-                <Checkbox
-                  status={isSel ? 'checked' : 'unchecked'}
-                  onPress={() => toggle(item)}
-                  color="#6c63ff"
-                  uncheckedColor="#fff"
+                <View
                   style={{
                     position: 'absolute',
                     top: 6,
@@ -227,7 +223,14 @@ export default function BoutiqueFolderScreen({ route, navigation }: Props) {
                     backgroundColor: 'rgba(0,0,0,0.25)',
                     borderRadius: 12,
                   }}
-                />
+                >
+                  <Checkbox
+                    status={isSel ? 'checked' : 'unchecked'}
+                    onPress={() => toggle(item)}
+                    color="#6c63ff"
+                    uncheckedColor="#fff"
+                  />
+                </View>
               </View>
             </TouchableOpacity>
           );

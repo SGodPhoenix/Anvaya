@@ -1,21 +1,31 @@
 // src/lib/pdf.ts
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
-import type { ItemWiseGroupMTM } from './zoho';
+import type { PDFPage } from 'pdf-lib';
+import type { ItemWiseGroupMTM, OutstandingInvoiceRow } from './zoho';
 
 /**
  * Replace characters not supported by WinAnsi (Helvetica) with ASCII fallbacks.
- * - arrows → ->  , ← -> , –/— -> -
- * - ellipsis … -> ...
- * - any other non-ASCII -> removed
+ * - right arrow becomes ->
+ * - left arrow becomes <-
+ * - en/em dashes become -
+ * - ellipsis becomes ...
+ * - any other non-ASCII character is stripped
  */
+const RIGHT_ARROW = String.fromCharCode(0x2192);
+const LEFT_ARROW = String.fromCharCode(0x2190);
+const EN_DASH = String.fromCharCode(0x2013);
+const EM_DASH = String.fromCharCode(0x2014);
+const ELLIPSIS = String.fromCharCode(0x2026);
+const HARD_HYPHEN = String.fromCharCode(0x2011);
+
 function safeText(input: string): string {
   if (!input) return '';
   return input
-    .replace(/→/g, '->')
-    .replace(/←/g, '<-')
-    .replace(/[–—]/g, '-')
-    .replace(/…/g, '...')
-    // strip any remaining non-ASCII
+    .replace(new RegExp(RIGHT_ARROW, 'g'), '->')
+    .replace(new RegExp(LEFT_ARROW, 'g'), '<-')
+    .replace(new RegExp(`${EN_DASH}|${EM_DASH}`, 'g'), '-')
+    .replace(new RegExp(ELLIPSIS, 'g'), '...')
+    .replace(new RegExp(HARD_HYPHEN, 'g'), '-')
     .replace(/[^\x00-\x7F]/g, '');
 }
 
@@ -35,7 +45,7 @@ export async function mergePdfBytes(buffers: Uint8Array[]): Promise<Uint8Array> 
 }
 
 /**
- * Create a clean, phone‑friendly Dispatch PDF table.
+ * Create a clean, phone-friendly Dispatch PDF table.
  * Columns (dynamic): Invoice No, Date, Brand, Amount, LR No, [LR Date], [Transport]
  */
 export async function generateDispatchPdf(opts: {
@@ -48,11 +58,13 @@ export async function generateDispatchPdf(opts: {
     lrNo: string;
     lrDate: string;
     transport: string;
+    type?: string;
   }>;
   showLRDate: boolean;
   showTransport: boolean;
+  groupByType?: boolean;
 }): Promise<Uint8Array> {
-  const { heading, rows, showLRDate, showTransport } = opts;
+  const { heading, rows, showLRDate, showTransport, groupByType = false } = opts;
 
   // A4 (portrait)
   const pageWidth = 595.28;
@@ -63,7 +75,6 @@ export async function generateDispatchPdf(opts: {
   const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
   const fontReg = await doc.embedFont(StandardFonts.Helvetica);
 
-  // Choose columns
   const columns = [
     { key: 'invoiceNo', label: 'Invoice No.', width: 90 },
     { key: 'invoiceDate', label: 'Date', width: 65 },
@@ -74,7 +85,6 @@ export async function generateDispatchPdf(opts: {
     ...(showTransport ? [{ key: 'transport', label: 'Transport', width: 120 }] : []),
   ] as { key: keyof (typeof rows)[number]; label: string; width: number }[];
 
-  // Typography
   const titleSize = 16;
   const subSize = 10;
   const headerSize = 11;
@@ -84,7 +94,6 @@ export async function generateDispatchPdf(opts: {
   let page = doc.addPage([pageWidth, pageHeight]);
   let y = pageHeight - margin;
 
-  // Title
   page.drawText('Dispatch Details', {
     x: margin,
     y: y - titleSize,
@@ -93,7 +102,6 @@ export async function generateDispatchPdf(opts: {
   });
   y -= titleSize + 6;
 
-  // Subtitle (sanitize to ASCII)
   const safeHeading = safeText(heading);
   page.drawText(safeHeading, {
     x: margin,
@@ -120,44 +128,72 @@ export async function generateDispatchPdf(opts: {
     y -= 6;
   };
 
-  const drawRow = (row: (typeof rows)[number]) => {
-    let x = margin;
-
-    columns.forEach((c) => {
-      let text = row[c.key] ?? '';
-      if (typeof text === 'number') text = text.toFixed(2);
-      else text = String(text);
-
-      // simple truncation to fit column width
-      const maxChars = Math.max(3, Math.floor(c.width / (cellSize * 0.55)));
-      if (text.length > maxChars) {
-        // use ASCII '...' (not Unicode ellipsis)
-        text = text.slice(0, maxChars - 3) + '...';
-      }
-
-      // ensure only ASCII characters go into the PDF
-      text = safeText(text);
-
-      page.drawText(text, { x, y: y - cellSize, size: cellSize, font: fontReg });
-      x += c.width;
-    });
-
-    y -= rowHeight;
-  };
-
-  drawHeader();
-
-  for (const r of rows) {
-    if (y < margin + 40) {
+  const drawGroupLabel = (label: string) => {
+    if (y < margin + headerSize * 3) {
       page = doc.addPage([pageWidth, pageHeight]);
       y = pageHeight - margin;
       drawHeader();
     }
+    page.drawText(`Type: ${label}`, {
+      x: margin,
+      y: y - headerSize,
+      size: headerSize,
+      font: fontBold,
+      color: rgb(0.25, 0.25, 0.25),
+    });
+    y -= headerSize + 6;
+  };
+
+  const drawRow = (row: (typeof rows)[number]) => {
+    let x = margin;
+    columns.forEach((c) => {
+      let text = row[c.key] ?? '';
+      if (typeof text === 'number') text = text.toFixed(2);
+      else text = String(text);
+      const maxChars = Math.max(3, Math.floor(c.width / (cellSize * 0.55)));
+      if (text.length > maxChars) {
+        text = text.slice(0, maxChars - 3) + '...';
+      }
+      text = safeText(text);
+      page.drawText(text, { x, y: y - cellSize, size: cellSize, font: fontReg });
+      x += c.width;
+    });
+    y -= rowHeight;
+  };
+
+  const orderedRows = groupByType
+    ? [...rows].sort((a, b) => {
+        const at = safeText((a.type || '').trim());
+        const bt = safeText((b.type || '').trim());
+        const cmp = at.localeCompare(bt);
+        if (cmp !== 0) return cmp;
+        return (a.invoiceDate || '').localeCompare(b.invoiceDate || '');
+      })
+    : rows;
+
+  drawHeader();
+
+  let currentType: string | null = null;
+  for (const r of orderedRows) {
+    if (groupByType) {
+      const nextType = safeText((r.type || '').trim() || 'No Type');
+      if (currentType !== nextType) {
+        currentType = nextType;
+        drawGroupLabel(nextType);
+      }
+    }
+    if (y < margin + 40) {
+      page = doc.addPage([pageWidth, pageHeight]);
+      y = pageHeight - margin;
+      drawHeader();
+      if (groupByType && currentType) {
+        drawGroupLabel(currentType);
+      }
+    }
     drawRow(r);
   }
 
-  // Totals footer
-  const total = rows.reduce((acc, r) => acc + (Number(r.amount) || 0), 0);
+  const total = orderedRows.reduce((acc, r) => acc + (Number(r.amount) || 0), 0);
   if (y < margin + 40) {
     page = doc.addPage([pageWidth, pageHeight]);
     y = pageHeight - margin;
@@ -169,7 +205,7 @@ export async function generateDispatchPdf(opts: {
     color: rgb(0.6, 0.6, 0.6),
   });
   y -= 14;
-  page.drawText(`Total Invoices: ${rows.length}`, {
+  page.drawText(`Total Invoices: ${orderedRows.length}` , {
     x: margin,
     y: y - cellSize,
     size: cellSize,
@@ -182,9 +218,9 @@ export async function generateDispatchPdf(opts: {
     font: fontBold,
   });
 
-  const bytes = await doc.save();
-  return bytes;
+  return await doc.save();
 }
+
 
 
 /* ---------------- Outstanding (label/value card) ------------------------ */
@@ -208,7 +244,7 @@ export async function generateOutstandingCardPdf(opts: {
   const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
   const fontReg = await doc.embedFont(StandardFonts.Helvetica);
 
-  // Larger type so you don’t need to zoom
+  // Larger type so you don't need to zoom
   const titleSize = 22;
   const subSize = 12;
   const rowSize = 14;
@@ -230,8 +266,8 @@ export async function generateOutstandingCardPdf(opts: {
     });
     y -= titleSize + 6;
 
-    // Sub-title (org — customer)
-    const sub = `${org} — ${customer}`;
+    // Sub-title (org - customer)
+    const sub = `${org} - ${customer}`;
     page.drawText(safeText(sub), {
       x: marginX,
       y: y - subSize,
@@ -285,7 +321,7 @@ export async function generateOutstandingCardPdf(opts: {
       color: rgb(0.05, 0.05, 0.05),
     });
 
-    // Value (right‑aligned in the remaining space)
+    // Value (right-aligned in the remaining space)
     const valueXRight = tableRight; // right edge
     const valueText = safeText(r.value);
     const valueWidth = fontReg.widthOfTextAtSize(valueText, rowSize);
@@ -301,6 +337,176 @@ export async function generateOutstandingCardPdf(opts: {
 
     y -= rowH;
   }
+
+  return await doc.save();
+}
+
+
+export async function generateOutstandingInvoicePdf(opts: {
+  org: string;
+  customer: string;
+  invoices: OutstandingInvoiceRow[];
+}): Promise<Uint8Array> {
+  const { org, customer, invoices } = opts;
+
+  const pageWidth = 595.28;
+  const pageHeight = 841.89;
+  const margin = 32;
+
+  const doc = await PDFDocument.create();
+  const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const fontReg = await doc.embedFont(StandardFonts.Helvetica);
+
+  const columns: Array<{ key: keyof OutstandingInvoiceRow; label: string; width: number; align?: 'left' | 'right'; }> = [
+    { key: 'invoiceDate', label: 'Date', width: 90 },
+    { key: 'invoiceNumber', label: 'Invoice #', width: 120 },
+    { key: 'total', label: 'Total', width: 100, align: 'right' },
+    { key: 'balance', label: 'Balance', width: 100, align: 'right' },
+    { key: 'age', label: 'Age (days)', width: 90, align: 'right' },
+  ];
+
+  const titleSize = 18;
+  const subSize = 11;
+  const headerSize = 11;
+  const cellSize = 10;
+  const rowHeight = 18;
+
+  let page = doc.addPage([pageWidth, pageHeight]);
+  let y = pageHeight - margin;
+
+  page.drawText('Outstanding Invoices', {
+    x: margin,
+    y: y - titleSize,
+    size: titleSize,
+    font: fontBold,
+  });
+  y -= titleSize + 6;
+
+  const subtitle = `${safeText(org)} - ${safeText(customer)}`;
+  page.drawText(subtitle, {
+    x: margin,
+    y: y - subSize,
+    size: subSize,
+    font: fontReg,
+    color: rgb(0.2, 0.2, 0.2),
+  });
+  y -= subSize + 10;
+
+  const drawHeader = () => {
+    let x = margin;
+    columns.forEach((c) => {
+      page.drawText(c.label, { x, y: y - headerSize, size: headerSize, font: fontBold });
+      x += c.width;
+    });
+    y -= headerSize + 4;
+    page.drawLine({
+      start: { x: margin, y },
+      end: { x: pageWidth - margin, y },
+      thickness: 0.5,
+      color: rgb(0.6, 0.6, 0.6),
+    });
+    y -= 6;
+  };
+
+  const formatAmount = (value: number) => {
+    try {
+      return new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
+    } catch {
+      return (Math.round((value + Number.EPSILON) * 100) / 100).toFixed(2);
+    }
+  };
+
+  const drawRow = (row: OutstandingInvoiceRow) => {
+    let x = margin;
+    for (const col of columns) {
+      let text: string;
+      if (col.key === 'total' || col.key === 'balance') {
+        text = formatAmount(Number(row[col.key] || 0));
+      } else if (col.key === 'age') {
+        text = String(Math.max(0, Number(row.age || 0)));
+      } else {
+        text = safeText(String(row[col.key] ?? ''));
+      }
+      const maxChars = Math.max(3, Math.floor(col.width / (cellSize * 0.55)));
+      if (text.length > maxChars) {
+        text = text.slice(0, maxChars - 3) + '...';
+      }
+      const drawX = col.align === 'right'
+        ? x + col.width - fontReg.widthOfTextAtSize(text, cellSize)
+        : x;
+      page.drawText(text, { x: drawX, y: y - cellSize, size: cellSize, font: fontReg });
+      x += col.width;
+    }
+    y -= rowHeight;
+  };
+
+  const ordered = [...invoices].sort((a, b) => (a.invoiceDate || '').localeCompare(b.invoiceDate || ''));
+
+  drawHeader();
+
+  for (const inv of ordered) {
+    if (y < margin + 40) {
+      page = doc.addPage([pageWidth, pageHeight]);
+      y = pageHeight - margin;
+      drawHeader();
+    }
+    drawRow(inv);
+  }
+
+  const buckets = new Map<number, number>();
+  let totalBalance = 0;
+  for (const inv of ordered) {
+    const bal = Number(inv.balance || 0);
+    if (bal <= 0) continue;
+    totalBalance += bal;
+    const age = Math.max(0, Math.floor(Number(inv.age || 0)));
+    let bucket = Math.floor(age / 15);
+    if (age > 0 && age % 15 === 0) bucket = Math.max(0, bucket - 1);
+    buckets.set(bucket, (buckets.get(bucket) || 0) + bal);
+  }
+
+  if (y < margin + 80) {
+    page = doc.addPage([pageWidth, pageHeight]);
+    y = pageHeight - margin;
+  }
+
+  page.drawLine({
+    start: { x: margin, y },
+    end: { x: pageWidth - margin, y },
+    thickness: 0.5,
+    color: rgb(0.6, 0.6, 0.6),
+  });
+  y -= 12;
+
+  const bucketEntries = Array.from(buckets.entries()).sort((a, b) => a[0] - b[0]);
+  for (const [idx, amt] of bucketEntries) {
+    if (amt <= 0) continue;
+    const rangeStart = idx === 0 ? 0 : idx * 15 + 1;
+    const rangeEnd = (idx + 1) * 15;
+    const label = idx === 0 ? '0-15 days' : `${rangeStart}-${rangeEnd} days`;
+    const amountText = formatAmount(amt);
+    page.drawText(safeText(label), { x: margin, y: y - cellSize, size: cellSize, font: fontBold });
+    const amountWidth = fontReg.widthOfTextAtSize(amountText, cellSize);
+    page.drawText(amountText, {
+      x: pageWidth - margin - amountWidth,
+      y: y - cellSize,
+      size: cellSize,
+      font: fontReg,
+    });
+    y -= rowHeight;
+    if (y < margin + 40) {
+      page = doc.addPage([pageWidth, pageHeight]);
+      y = pageHeight - margin;
+    }
+  }
+
+  const totalText = `Total Outstanding: ${formatAmount(totalBalance)}`;
+  page.drawText(totalText, {
+    x: margin,
+    y: y - cellSize,
+    size: cellSize,
+    font: fontBold,
+  });
 
   return await doc.save();
 }
@@ -364,7 +570,7 @@ export async function generateDispatchItemWisePdfMTM(opts: {
   const drawCell = (txt: string, x: number, w: number, align: 'L'|'R', sz: number, font: any) => {
     txt = ansi(txt);
     const maxChars = Math.max(3, Math.floor(w / (sz * 0.54)));
-    if (txt.length > maxChars) txt = txt.slice(0, maxChars - 1) + '…';
+    if (txt.length > maxChars) txt = txt.slice(0, maxChars - 1) + '...';
     const tw = widthOf(font, sz, txt);
     const tx = align === 'R' ? (x + w - tw) : x;
     page.drawText(txt, { x: tx, y: y - sz, size: sz, font });
@@ -489,7 +695,7 @@ export async function generateDispatchItemWisePdf(opts: {
   const drawCell = (txt: string, x: number, w: number, align: 'L'|'R', sz: number, font: any) => {
     txt = ansi(txt);
     const maxChars = Math.max(3, Math.floor(w / (sz * 0.54)));
-    if (txt.length > maxChars) txt = txt.slice(0, maxChars - 1) + '…';
+    if (txt.length > maxChars) txt = txt.slice(0, maxChars - 1) + '...';
     const tw = widthOf(font, sz, txt);
     const tx = align === 'R' ? (x + w - tw) : x;
     page.drawText(txt, { x: tx, y: y - sz, size: sz, font });

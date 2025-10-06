@@ -16,7 +16,7 @@ import {
   fetchOutstandingForOrg,
   type OutstandingCustomerRow
 } from '../lib/zoho';
-import { generateOutstandingCardPdf } from '../lib/pdf';
+import { generateOutstandingCardPdf, generateOutstandingInvoicePdf } from '../lib/pdf';
 import { buildAndShareOutstandingWorkbook } from '../lib/excel';
 import { ensureDir, uniqueName } from '../lib/utils';
 
@@ -68,6 +68,7 @@ export default function OutstandingScreen() {
   const [loadingCust, setLoadingCust] = useState(false);
 
   const [rowsByCustomer, setRowsByCustomer] = useState<Record<string, OutstandingCustomerRow>>({});
+  const [invoiceByCustomer, setInvoiceByCustomer] = useState<Record<string, OutstandingInvoiceRow[]>>({});
   const [isWorking, setIsWorking] = useState(false);
   const [snack, setSnack] = useState({ visible: false, msg: '' });
   const [log, setLog] = useState<string[]>([]);
@@ -135,7 +136,7 @@ export default function OutstandingScreen() {
     setLog([]);
     try {
       setLoadingCust(true);
-      appendLog(`Fetching customers (${selectedOrg})…`);
+      appendLog(`Fetching customers (${selectedOrg})...`);
       const list = await fetchCustomers(selectedOrg);
       setCustomers(list);
       await AsyncStorage.setItem(
@@ -145,16 +146,16 @@ export default function OutstandingScreen() {
       setLoadingCust(false);
       appendLog(`Customers ${list.length}`);
 
-      appendLog(`Fetching outstanding map (${selectedOrg})…`);
+      appendLog(`Fetching outstanding map (${selectedOrg})...`);
       const rowsMap = await fetchOutstandingForOrg(selectedOrg, (s) => appendLog(s));
       setRowsByCustomer(rowsMap);
       await AsyncStorage.setItem(cacheKeyOutstanding, JSON.stringify(rowsMap));
 
-      setSnack({ visible: true, msg: '✅ Data refreshed' });
+      setSnack({ visible: true, msg: 'OK Data refreshed' });
       appendLog('Done');
     } catch (e: any) {
-      setSnack({ visible: true, msg: '❌ Refresh failed' });
-      appendLog(`❌ ${e?.message || e}`);
+      setSnack({ visible: true, msg: 'ERR Refresh failed' });
+      appendLog(`ERR ${e?.message || e}`);
       setLoadingCust(false);
     } finally {
       setIsWorking(false);
@@ -165,12 +166,12 @@ export default function OutstandingScreen() {
     try {
       setIsWorking(true);
       setLog([]);
-      appendLog('Building workbook…');
+      appendLog('Building workbook...');
       await buildAndShareOutstandingWorkbook((s) => appendLog(s)); // uses your beautified excel builder
-      setSnack({ visible: true, msg: '✅ Excel ready' });
+      setSnack({ visible: true, msg: 'OK Excel ready' });
     } catch (e: any) {
-      setSnack({ visible: true, msg: '❌ Excel failed' });
-      appendLog(`❌ ${e?.message || e}`);
+      setSnack({ visible: true, msg: 'ERR Excel failed' });
+      appendLog(`ERR ${e?.message || e}`);
     } finally {
       setIsWorking(false);
     }
@@ -184,9 +185,8 @@ export default function OutstandingScreen() {
       }
       setIsWorking(true);
       setLog([]);
-      appendLog('Creating PDF…');
+      appendLog('Creating summary PDF...');
 
-      // Exclude the 2 payment rows from the PDF
       const rows = [
         ['0-15', currentRow['0-15']],
         ['16-30', currentRow['16-30']],
@@ -211,7 +211,7 @@ export default function OutstandingScreen() {
       });
 
       const base64 = fromByteArray(bytes);
-      const safe = currentRow.customerName.replace(/[\\/:*?"<>|]/g, '_');
+      const safe = currentRow.customerName.replace(/[\/:*?"<>|]/g, '_');
       const name = `Outstanding_${safe}_${uniqueName()}.pdf`;
 
       const baseDir = FSLegacy.documentDirectory || FSLegacy.cacheDirectory;
@@ -222,10 +222,51 @@ export default function OutstandingScreen() {
 
       await FSLegacy.writeAsStringAsync(uri, base64, { encoding: FSLegacy.EncodingType.Base64 });
       if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(uri);
-      setSnack({ visible: true, msg: '✅ PDF ready' });
+      setSnack({ visible: true, msg: 'PDF ready' });
     } catch (e: any) {
-      setSnack({ visible: true, msg: '❌ PDF failed' });
-      appendLog(`❌ ${e?.message || e}`);
+      setSnack({ visible: true, msg: 'PDF failed' });
+      appendLog(`Error ${e?.message || e}`);
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const onInvoicePdf = async () => {
+    try {
+      if (!selectedCustomer) {
+        setSnack({ visible: true, msg: 'Pick a customer to export PDF' });
+        return;
+      }
+      const list = invoiceByCustomer[selectedCustomer] || [];
+      if (list.length === 0) {
+        setSnack({ visible: true, msg: 'No unpaid invoices for this customer' });
+        return;
+      }
+      setIsWorking(true);
+      setLog([]);
+      appendLog('Creating invoice list PDF...');
+
+      const bytes = await generateOutstandingInvoicePdf({
+        org: firmLabel,
+        customer: selectedCustomer,
+        invoices: list,
+      });
+
+      const base64 = fromByteArray(bytes);
+      const safe = selectedCustomer.replace(/[\/:*?"<>|]/g, '_');
+      const name = `Outstanding_Invoices_${safe}_${uniqueName()}.pdf`;
+      const baseDir = FSLegacy.documentDirectory || FSLegacy.cacheDirectory;
+      if (!baseDir) throw new Error('No writable directory');
+      const outDir = baseDir + 'Anvaya/';
+      await ensureDir(outDir);
+      const uri = outDir + name;
+
+      await FSLegacy.writeAsStringAsync(uri, base64, { encoding: FSLegacy.EncodingType.Base64 });
+      if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(uri);
+      setSnack({ visible: true, msg: 'Invoice PDF ready' });
+    } catch (e: any) {
+      setSnack({ visible: true, msg: 'Invoice PDF failed' });
+      appendLog(`Error ${e?.message || e}`);
     } finally {
       setIsWorking(false);
     }
@@ -260,8 +301,8 @@ export default function OutstandingScreen() {
     <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12 }}>
       <Card style={{ borderRadius: 16, overflow: 'hidden' }}>
         <Card.Title
-          title="📒 Outstanding"
-          subtitle="Select firm → Refresh → choose a customer"
+          title="Outstanding"
+          subtitle="Select firm -> Refresh -> choose a customer"
           right={(props) => (
             <View style={{ flexDirection: 'row' }}>
               <IconButton
@@ -306,6 +347,14 @@ export default function OutstandingScreen() {
               icon="file-pdf-box"
               onPress={onPdf}
               disabled={!selectedCustomer || !rowsByCustomer[selectedCustomer] || isWorking}
+              style={{ marginLeft: 4 }}
+            />
+            <IconButton
+              icon="file-table-box"
+              onPress={onInvoicePdf}
+              disabled={!selectedCustomer || !(invoiceByCustomer[selectedCustomer] || []).length || isWorking}
+              style={{ marginLeft: 4 }}
+              accessibilityLabel="Download invoice-wise PDF"
             />
           </View>
 
@@ -321,7 +370,7 @@ export default function OutstandingScreen() {
                 <Card style={{ borderRadius: 12, marginBottom: 12 }}>
                   <Card.Title
                     title={currentRow.customerName === 'TOTAL'
-                      ? `${firmLabel} — TOTAL`
+                      ? `${firmLabel} - TOTAL`
                       : currentRow.customerName}
                     subtitle={currentRow.customerName === 'TOTAL' ? '' : firmLabel}
                   />
@@ -364,7 +413,7 @@ export default function OutstandingScreen() {
 
       {/* Activity */}
       <Card style={{ marginTop: 16, borderRadius: 16, marginBottom: 20 }}>
-        <Card.Title title="📡 Activity" subtitle="Live log" />
+        <Card.Title title="Activity" subtitle="Live log" />
         <Divider />
         <Card.Content>
           {log.length === 0 ? (
@@ -427,7 +476,7 @@ export default function OutstandingScreen() {
         >
           <Text variant="titleMedium">Pick Customer</Text>
           <Searchbar
-            placeholder="Search…"
+            placeholder="Search..."
             value={custQuery}
             onChangeText={setCustQuery}
             style={{ marginTop: 8, marginBottom: 8 }}

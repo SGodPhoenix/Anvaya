@@ -7,8 +7,7 @@ import {
 import DateTimePicker from '@react-native-community/datetimepicker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Sharing from 'expo-sharing';
-import * as FS from 'expo-file-system';
-import * as FSLegacy from 'expo-file-system/legacy';
+import * as FS from 'expo-file-system/legacy';
 
 import { ORGS, type OrgKey, fetchCustomers, fetchDispatchRows } from '../lib/zoho';
 import { generateDispatchPdf } from '../lib/pdf';
@@ -32,6 +31,7 @@ export default function DispatchScreen() {
 
   const [includeLRDate, setIncludeLRDate] = useState(true);
   const [includeTransport, setIncludeTransport] = useState(true);
+  const [groupByType, setGroupByType] = useState(false);
 
   const [customers, setCustomers] = useState<{ customer_id: string; customer_name: string }[]>([]);
   const [custModalVisible, setCustModalVisible] = useState(false);
@@ -60,6 +60,10 @@ export default function DispatchScreen() {
   }, [cacheKey]);
 
   useEffect(() => {
+    if (selectedOrg !== 'PM') setGroupByType(false);
+  }, [selectedOrg]);
+
+  useEffect(() => {
     const t = setTimeout(() => logRef.current?.scrollToEnd({ animated:true }), 50);
     return () => clearTimeout(t);
   }, [log]);
@@ -73,7 +77,7 @@ export default function DispatchScreen() {
   const refreshCustomers = async () => {
     try {
       setLoadingCust(true);
-      appendLog(`Fetching customers for ${selectedOrg}…`);
+      appendLog(`Fetching customers for ${selectedOrg}...`);
       const list = await fetchCustomers(selectedOrg);
       setCustomers(list);
       await AsyncStorage.setItem(cacheKey, JSON.stringify({ customers: list, cachedAt: Date.now() }));
@@ -81,14 +85,14 @@ export default function DispatchScreen() {
       appendLog(`Loaded ${list.length} customers for ${selectedOrg} (cached).`);
     } catch (e: any) {
       setSnack({ visible: true, msg: `Failed to fetch customers` });
-      appendLog(`❌ Failed to fetch customers: ${e?.message || e}`);
+      appendLog(`ERR Failed to fetch customers: ${e?.message || e}`);
     } finally {
       setLoadingCust(false);
     }
   };
 
   const openFile = async (uri: string) => {
-    appendLog(`Opening → ${uri}`);
+    appendLog(`Opening -> ${uri}`);
     if (await Sharing.isAvailableAsync()) {
       await Sharing.shareAsync(uri);
     } else {
@@ -105,17 +109,18 @@ export default function DispatchScreen() {
         from: formatDateIso(fromDate),
         to: formatDateIso(toDate),
       };
-      appendLog(`Loading dispatch rows → [${payload.org}] ${payload.customer} (${payload.from} → ${payload.to})`);
+      appendLog(`Loading dispatch rows -> [${payload.org}] ${payload.customer} (${payload.from} -> ${payload.to})`);
 
       const rows = await fetchDispatchRows(payload, appendLog);
       appendLog(`Fetched ${rows.length} rows`);
 
-      const heading = `${payload.customer} — ${payload.from} → ${payload.to}`;
+      const heading = `${payload.customer} - ${payload.from} -> ${payload.to}`;
       const bytes = await generateDispatchPdf({
         heading,
         rows,
         showLRDate: includeLRDate,
         showTransport: includeTransport,
+        groupByType: selectedOrg === 'PM' ? groupByType : false,
       });
 
       const base64 = fromByteArray(bytes);
@@ -128,17 +133,17 @@ export default function DispatchScreen() {
         const dir = base + 'Anvaya/';
         await ensureDir(dir);
         const uri = dir + fileName;
-        await FSLegacy.writeAsStringAsync(uri, base64, { encoding: FSLegacy.EncodingType.Base64 });
+        await FS.writeAsStringAsync(uri, base64, { encoding: FS.EncodingType.Base64 });
         return uri;
       };
 
-      let fileUri = await trySave(FSLegacy.documentDirectory);
-      if (!fileUri) fileUri = await trySave(FSLegacy.cacheDirectory);
+      let fileUri = await trySave(FS.documentDirectory);
+      if (!fileUri) fileUri = await trySave(FS.cacheDirectory);
 
-      if (!fileUri && (FS as any).StorageAccessFramework && Platform.OS === 'android') {
-        appendLog('Requesting SAF permission…');
+      if (!fileUri && FS.StorageAccessFramework && Platform.OS === 'android') {
+        appendLog('Requesting SAF permission...');
         const perm = await FS.StorageAccessFramework.requestDirectoryPermissionsAsync();
-        if (perm.granted) {
+        if (perm.granted && perm.directoryUri) {
           fileUri = await FS.StorageAccessFramework.createFileAsync(
             perm.directoryUri,
             fileName,
@@ -150,12 +155,12 @@ export default function DispatchScreen() {
 
       if (!fileUri) throw new Error('No writable directory available');
 
-      appendLog(`Saved → ${fileUri}`);
-      setSnack({ visible: true, msg: '✅ Dispatch PDF ready — sharing…' });
+      appendLog(`Saved -> ${fileUri}`);
+      setSnack({ visible: true, msg: 'Dispatch PDF ready - sharing...' });
       await openFile(fileUri);
     } catch (e: any) {
-      setSnack({ visible: true, msg: '❌ Error' });
-      appendLog(`❌ Error: ${e?.message || e}`);
+      setSnack({ visible: true, msg: 'Error' });
+      appendLog(`Error: ${e?.message || e}`);
     } finally {
       setIsWorking(false);
     }
@@ -166,7 +171,7 @@ export default function DispatchScreen() {
       {/* Filters */}
       <Card style={{ borderRadius:16, overflow:'hidden' }}>
         <Card.Title
-          title="🚚 Dispatch Details"
+          title="Dispatch Details"
           subtitle="Select org, customer, date range and options"
           right={(props) => (
             <IconButton
@@ -229,7 +234,7 @@ export default function DispatchScreen() {
                 Select Customer ({ORGS.find(o => o.key === selectedOrg)?.name})
               </Text>
               <Searchbar
-                placeholder="Search customers…"
+                placeholder="Search customers..."
                 value={custQuery}
                 onChangeText={setCustQuery}
                 style={{ marginBottom:8 }}
@@ -296,6 +301,12 @@ export default function DispatchScreen() {
               <Checkbox status={includeTransport ? 'checked' : 'unchecked'} onPress={() => setIncludeTransport(v => !v)} />
               <Text>Transport (cf_transport_name)</Text>
             </View>
+            {selectedOrg === 'PM' && (
+              <View style={{ flexDirection:'row', alignItems:'center', marginTop:6 }}>
+                <Checkbox status={groupByType ? 'checked' : 'unchecked'} onPress={() => setGroupByType((v) => !v)} />
+                <Text>Group by Type (cf_type)</Text>
+              </View>
+            )}
           </View>
 
           <Button
@@ -304,14 +315,14 @@ export default function DispatchScreen() {
             style={{ marginTop:18, paddingVertical:6, borderRadius:10 }}
             disabled={!selectedCustomer || isWorking}
           >
-            📄 Generate Dispatch PDF
+            Generate Dispatch PDF
           </Button>
         </Card.Content>
       </Card>
 
       {/* Activity */}
       <Card style={{ marginTop:16, borderRadius:16, marginBottom:20 }}>
-        <Card.Title title="📡 Activity" subtitle="Live log" right={() => (isWorking ? <ActivityIndicator style={{ marginRight:16 }} /> : null)} />
+        <Card.Title title="Activity" subtitle="Live log" right={() => (isWorking ? <ActivityIndicator style={{ marginRight:16 }} /> : null)} />
         <Divider />
         <Card.Content>
           {log.length === 0 ? <Text>Idle.</Text> : (
